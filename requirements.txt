@@ -1,0 +1,4 @@
+customtkinter
+pyautogui
+pynput
+pyobjc; platform_system == "Darwin"
