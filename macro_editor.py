@@ -12,16 +12,22 @@ from utils import KEY_LIST, flush_modifiers, busy_wait, esc_pressed
 class MacroEditor(ctk.CTkFrame):
     """
     マクロエディタ（完全版）
-    - ブロック追加 / 配線（ポートドラッグ or 接続モード） / 実行
+    - ブロック追加 / 接続（ポートドラッグ or 接続モード） / 実行（入口からDFS）
     - ダブルクリックでインライン名称編集
     - 複数選択（Shift+クリック / マーキー）・複製・削除
-    - 右バナー（インスペクタ）で詳細編集＆削除
-    - 入力系フォーカス中はショートカット無効化（Delete誤爆防止）
+    - 右バナー（インスペクタ）で詳細編集＆削除ボタン
+    - 入力欄フォーカス中はショートカット無効（Delete誤爆防止）
     - グリッドスナップ（10px）
-    - アクション：左クリック / 右クリック / ダブルクリック / キー入力 / マウス移動（絶対/相対, X/Y, 時間）
+    - アクション：
+        左クリック / 右クリック / ダブルクリック / キー入力 /
+        マウス移動（絶対/相対, X/Y, 時間）
     - ショートカット：
         A: アクション切替, P: 押し方切替, +/=: 回数+1, -: 回数-1,
-        [: 間隔0.5x, ]: 間隔2x, .: 間隔=0.01, D: 複製, Delete: 削除, G: グリッドスナップ切替
+        [: 間隔0.5x, ]: 間隔2x, .: 間隔=0.01, D: 複製,
+        Delete/Backspace: 削除, G: グリッドスナップ切替, Esc（接続モード中のみ）: キャンセル
+    - 接続モードの可視化：
+        ボタン文言/色、バッジ、カーソル、キャンバス透かし、タイトル表示
+    - ツールバー右上にリアルタイム座標表示＆「現在地を反映」ボタン
     """
 
     # ======================== 初期化 ========================
@@ -51,10 +57,26 @@ class MacroEditor(ctk.CTkFrame):
         toolbar.pack(fill="x", padx=8, pady=(8, 6))
         ctk.CTkButton(toolbar, text="ブロック追加",
                       command=lambda: self.add_block(select_after_add=True)).pack(side="left", padx=4)
-        ctk.CTkButton(toolbar, text="接続モード",
-                      command=self.toggle_connect).pack(side="left", padx=4)
+
+        # 接続モードトグル（状態UI付き）
+        self.btn_connect = ctk.CTkButton(
+            toolbar, text="接続モード: OFF",
+            fg_color="#3C3C3C", hover_color="#4A4A4A",
+            command=self.toggle_connect
+        )
+        self.btn_connect.pack(side="left", padx=4)
+
         ctk.CTkButton(toolbar, text="マクロ実行",
                       command=self.run_macro).pack(side="left", padx=4)
+
+        # 右側：接続モードのバッジ & 座標ラベル
+        self.connect_badge = ctk.CTkLabel(toolbar, text="CONNECT",
+                                          fg_color="#3C3C3C", text_color="#BBBBBB",
+                                          corner_radius=999, padx=10, pady=4)
+        self.connect_badge.pack(side="right", padx=6)
+
+        self.cursor_label = ctk.CTkLabel(toolbar, text="(x, y) = (---, ---)", text_color="#A0A0A0")
+        self.cursor_label.pack(side="right", padx=6)
 
         # 本体
         body = ctk.CTkFrame(self)
@@ -65,6 +87,10 @@ class MacroEditor(ctk.CTkFrame):
         c_area.pack(side="left", fill="both", expand=True)
         self.canvas = ctk.CTkCanvas(c_area, bg="#2A2A2A", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
+
+        # 接続モード透かし
+        self.connect_hint_id = None
+        self._update_connect_ui()
 
         # インスペクタ（右バナー）
         self.inspector = ctk.CTkFrame(body, width=300)
@@ -85,25 +111,67 @@ class MacroEditor(ctk.CTkFrame):
 
         # バインド：ショートカット（入力欄フォーカス中は無効化）
         self.canvas.bind_all("<Key>", self._on_key_shortcuts)
-        # 座標ラベル（右寄せ）
-        self.cursor_label = ctk.CTkLabel(toolbar, text="(x, y) = (---, ---)", text_color="#A0A0A0")
-        self.cursor_label.pack(side="right", padx=6)
 
-        # 座標アップデート開始
+        # 座標更新開始
         self._tick_cursor()
-    def _tick_cursor(self):
-        """マウスカーソル座標を 50ms 間隔で表示更新"""
-        try:
-            x, y = pag.position()
-            # 必要ならここでマルチモニタやスケーリング補正を入れる
-            self.cursor_label.configure(text=f"(x, y) = ({x}, {y})")
-        except Exception:
-            # 一瞬取得できないことがある環境でも落ちないように
-            pass
-        # 50ms 後に再実行（負荷が気になるなら 100ms でもOK）
-        self.after(50, self._tick_cursor)
 
+    # ======================== 接続モードUI ========================
+    def toggle_connect(self):
+        self.connect_mode = not self.connect_mode
+        self._update_connect_ui()
+        print(f"接続モード：{'ON' if self.connect_mode else 'OFF'}")
 
+    def _update_connect_ui(self):
+        """接続モードのUI（ボタン/バッジ/カーソル/透かし/タイトル）を同期"""
+        if self.connect_mode:
+            # ボタン
+            self.btn_connect.configure(text="接続モード: ON",
+                                       fg_color="#2563EB",  # 青
+                                       hover_color="#1D4ED8")
+            # バッジ
+            self.connect_badge.configure(fg_color="#2563EB", text_color="white")
+            # カーソル
+            self.canvas.configure(cursor="tcross")
+            # 透かし
+            if not self.connect_hint_id or not self._item_exists(self.connect_hint_id):
+                self.connect_hint_id = self.canvas.create_text(
+                    12, 12, anchor="nw",
+                    text="接続モード（クリックで接続 / Escでキャンセル）",
+                    fill="#9AB6FF", font=("TkDefaultFont", 11, "bold"),
+                    tags=("connect_hint",)
+                )
+            # タイトルに表示
+            try:
+                top = self.winfo_toplevel()
+                base = getattr(self, "_base_title", None) or top.title() or "AuterGUI"
+                self._base_title = base
+                top.title(f"{base}  —  CONNECT MODE")
+            except Exception:
+                pass
+        else:
+            # ボタン
+            self.btn_connect.configure(text="接続モード: OFF",
+                                       fg_color="#3C3C3C",
+                                       hover_color="#4A4A4A")
+            # バッジ
+            self.connect_badge.configure(fg_color="#3C3C3C", text_color="#BBBBBB")
+            # カーソル
+            self.canvas.configure(cursor="")
+            # 透かし削除
+            if self.connect_hint_id and self._item_exists(self.connect_hint_id):
+                try:
+                    self.canvas.delete(self.connect_hint_id)
+                except Exception:
+                    pass
+            self.connect_hint_id = None
+            # タイトル戻す
+            try:
+                top = self.winfo_toplevel()
+                base = getattr(self, "_base_title", None) or top.title()
+                if base:
+                    top.title(base)
+            except Exception:
+                pass
 
     # ======================== インスペクタ（右バナー） ========================
     def _build_inspector(self, parent):
@@ -205,6 +273,12 @@ class MacroEditor(ctk.CTkFrame):
         e5 = ctk.CTkEntry(self.row_move_xy, textvariable=self.var_move_y, width=80)
         e5.grid(row=0, column=3)
         e5.bind("<FocusOut>", lambda *_: self._apply_inspector())
+
+        # 現在地を反映
+        reflect_btn = ctk.CTkButton(
+            self.row_move_xy, text="現在地を反映", width=100, command=self._fill_xy_with_cursor
+        )
+        reflect_btn.grid(row=0, column=4, padx=(12, 0))
 
         self.row_move_time = ctk.CTkFrame(parent)
         self.row_move_time.pack(fill="x", padx=12, pady=(2, 10))
@@ -386,11 +460,7 @@ class MacroEditor(ctk.CTkFrame):
         if select_after_add:
             self._select_block(bid)
 
-    def toggle_connect(self):
-        self.connect_mode = not self.connect_mode
-        self.canvas.configure(cursor="tcross" if self.connect_mode else "")
-        print(f"接続モード：{'ON' if self.connect_mode else 'OFF'}")
-
+    # ======================== クリック/ドラッグ ========================
     def _on_block_click(self, event):
         items = self.canvas.find_withtag("current")
         if not items:
@@ -400,10 +470,15 @@ class MacroEditor(ctk.CTkFrame):
         if not bid or bid not in self.blocks:
             return
 
+        # 接続モード：クリックで接続 → 自動OFF
         if self.connect_mode:
             if self.current_block_id and self.current_block_id != bid:
                 self._draw_connection(self.current_block_id, bid)
-            self._select_block(bid)
+                self.connect_mode = False
+                self._update_connect_ui()
+                print("接続完了 → 接続モード OFF")
+            else:
+                self._select_block(bid)
             return
 
         bx, by = self.blocks[bid]['x'], self.blocks[bid]['y']
@@ -634,9 +709,9 @@ class MacroEditor(ctk.CTkFrame):
 
         item = self.canvas.find_withtag("current")
         if not item:
-            # 配線をやめた場合も接続モードを解除しておくと誤操作が減る
+            # キャンセル扱い
             self.connect_mode = False
-            self.canvas.configure(cursor="")
+            self._update_connect_ui()
             return
 
         tags = self.canvas.gettags(item)
@@ -644,11 +719,10 @@ class MacroEditor(ctk.CTkFrame):
         if bid_to and bid_to != bid_from:
             self._draw_connection(bid_from, bid_to)
 
-        # ★ここでモード解除
+        # 完了後は自動OFF
         self.connect_mode = False
-        self.canvas.configure(cursor="")
+        self._update_connect_ui()
         print("接続完了 → 接続モード OFF")
-
 
     def _port_center(self, bid, side):
         x, y, w, h = self.blocks[bid]['x'], self.blocks[bid]['y'], self.blocks[bid]['w'], self.blocks[bid]['h']
@@ -729,6 +803,23 @@ class MacroEditor(ctk.CTkFrame):
         # 入力欄にフォーカスがある間はショートカット無効化
         if self._is_typing_widget(self.focus_get()):
             return
+
+        key = (event.keysym or "").lower()
+
+        # Escで接続モードをキャンセル
+        if key == 'escape' and self.connect_mode:
+            self.connect_mode = False
+            if self.wire_preview and self._item_exists(self.wire_preview):
+                try:
+                    self.canvas.delete(self.wire_preview)
+                except Exception:
+                    pass
+            self.wire_preview = None
+            self.wire_from = None
+            self._update_connect_ui()
+            print("接続モードをキャンセル")
+            return
+
         if not self.current_block_id:
             return
 
@@ -740,8 +831,6 @@ class MacroEditor(ctk.CTkFrame):
                     continue
                 fn(self.blocks[b]['config'])
                 self._refresh_block_label(b)
-
-        key = (event.keysym or "").lower()
 
         if key == 'a':
             order = ["左クリック", "右クリック", "ダブルクリック", "キー入力", "マウス移動"]
@@ -974,6 +1063,27 @@ class MacroEditor(ctk.CTkFrame):
                 return
 
         print(f"{bid} 実行完了")
+
+    # ======================== ランタイムUIユーティリティ ========================
+    def _tick_cursor(self):
+        """マウスカーソル座標を 50ms 間隔で表示更新"""
+        try:
+            x, y = pag.position()
+            self.cursor_label.configure(text=f"(x, y) = ({x}, {y})")
+        except Exception:
+            pass
+        self.after(50, self._tick_cursor)
+
+    def _fill_xy_with_cursor(self):
+        """現在のカーソル位置を X/Y に反映（絶対座標モード前提）"""
+        try:
+            x, y = pag.position()
+            self.var_move_mode.set("絶対座標")
+            self.var_move_x.set(str(x))
+            self.var_move_y.set(str(y))
+            self._apply_inspector()
+        except Exception:
+            pass
 
     # ======================== 安全ユーティリティ ========================
     def _item_exists(self, item_id) -> bool:
