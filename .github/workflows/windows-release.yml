@@ -1,25 +1,20 @@
-name: Windows Build (PyInstaller)
+name: Windows Release
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
+    tags:
+      - "v*.*.*"
 
 jobs:
-  build-win:
+  release-win:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
@@ -31,14 +26,17 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # PowerShell だと -- が誤解釈されるので cmd にする
       - name: Build EXE
         shell: cmd
         run: pyinstaller main.py --name AuterGUI --noconsole --windowed --icon ico.ico
-        # 出力: dist\AuterGUI\AuterGUI.exe
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Zip artifact
+        shell: powershell
+        run: Compress-Archive -Path dist/AuterGUI/* -DestinationPath AuterGUI-win.zip -Force
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: AuterGUI-win
-          path: dist\AuterGUI\**
+          files: AuterGUI-win.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
