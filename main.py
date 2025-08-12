@@ -6,6 +6,45 @@ from hotkeys import HotkeyManager
 from action_panel import ActionPanel
 from macro_editor import MacroEditor
 
+# --- launch logging (Finder 起動でもログが残る) ---
+import os, sys, datetime, traceback
+
+LOG_DIR = os.path.expanduser("~/Library/Logs/AuterGUI")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "launch.log")
+
+def _log(msg: str):
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now().isoformat()}] {msg}\n")
+    except Exception:
+        # 予期せぬファイル権限などで書けない場合は無視
+        pass
+
+def excepthook(etype, evalue, etb):
+    # 例外をログに残し、Finder 起動でも気づけるよう簡易ダイアログを出す
+    try:
+        _log("UNCAUGHT:\n" + "".join(traceback.format_exception(etype, evalue, etb)))
+    finally:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            rt = tk.Tk(); rt.withdraw()
+            messagebox.showerror("AuterGUI 起動エラー", f"{etype.__name__}: {evalue}\n\n詳しくは {LOG_FILE}")
+            rt.destroy()
+        except Exception:
+            pass
+    # 元のハンドラへ委譲
+    try:
+        sys.__excepthook__(etype, evalue, etb)
+    except Exception:
+        pass
+
+sys.excepthook = excepthook
+_log("==== LAUNCH ====")
+
+import platform, subprocess
+
 # ダークテーマ
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -41,6 +80,32 @@ class App(ctk.CTk):
 
         # ホットキー管理
         self.hk = HotkeyManager(on_fire=self._fire_action, on_esc=self._on_esc)
+
+        # mac の権限促しは GUI 構築後に遅延実行（Finder 起動時のクラッシュ回避）
+        if platform.system() == "Darwin":
+            try:
+                self.after(800, self._mac_deferred_ax_prompt)
+            except Exception as e:
+                _log(f"schedule deferred ax prompt failed: {e}")
+
+    # ---- macOS: アクセシビリティ/入力監視の促しは GUI 初期化後に安全に実行 ----
+    def _mac_deferred_ax_prompt(self):
+        # Finder 起動での EXC_BAD_ACCESS を避けるため、ネイティブ API 呼び出しは避け、設定アプリを開くだけにする
+        try:
+            if platform.system() == "Darwin":
+                # すでに許可済みなら何もしない（厳密判定は避ける）
+                subprocess.run(
+                    ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                    check=False
+                )
+                subprocess.run(
+                    ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"],
+                    check=False
+                )
+                _log("Opened System Settings for Accessibility/Input Monitoring (deferred)")
+        except Exception as e:
+            _log(f"Deferred AX prompt failed: {e}")
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ==== 実行フロー ====
